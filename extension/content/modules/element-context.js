@@ -3,6 +3,7 @@
 // Operates on host page DOM. No UI.
 
 var VibeElementContext = (() => {
+  const SHADOW_SELECTOR_SEPARATOR = ' >> ';
 
   // --- Main entry point ---
 
@@ -82,6 +83,9 @@ var VibeElementContext = (() => {
   // --- Selector generation (multi-strategy fallback) ---
 
   function generateSelector(element) {
+    const shadowSelector = generateShadowAwareSelector(element);
+    if (shadowSelector) return shadowSelector;
+
     if (element.id) return `#${CSS.escape(element.id)}`;
 
     const unique = findUniqueAttributeSelector(element);
@@ -105,7 +109,112 @@ var VibeElementContext = (() => {
     return generateDataAttributeSelector(element);
   }
 
-  function findUniqueAttributeSelector(element) {
+  function generateShadowAwareSelector(element) {
+    if (!VibeShadowDOMUtils.isInShadowDOM(element)) return null;
+
+    const root = element.getRootNode();
+    if (!(root instanceof ShadowRoot)) return null;
+
+    const shadowHosts = VibeShadowDOMUtils.getShadowPath(element);
+    if (!shadowHosts.length) return null;
+
+    const hostSelectors = [];
+    for (let i = 0; i < shadowHosts.length; i++) {
+      const host = shadowHosts[i];
+      const hostRoot = i === 0 ? document : shadowHosts[i - 1].shadowRoot;
+      const hostSelector = generateHostSelector(host, hostRoot);
+      if (!hostSelector) return null;
+      hostSelectors.push(hostSelector);
+    }
+
+    const innerSelector = generateSelectorInShadowRoot(element, root);
+
+    return [...hostSelectors, innerSelector].join(SHADOW_SELECTOR_SEPARATOR);
+  }
+
+  function generateSelectorInShadowRoot(element, root) {
+    const unique = findUniqueAttributeSelector(element, root);
+    if (unique) return unique;
+
+    const textSel = generateTextBasedSelector(element, root);
+    if (textSel && isUnique(textSel, root)) return textSel;
+
+    const classSel = generateClassSelector(element);
+    if (classSel && isUnique(classSel, root)) return classSel;
+
+    const pathParts = [];
+    let current = element;
+    while (current && current !== root) {
+      const tag = current.tagName.toLowerCase();
+      let part = tag;
+      const parent = current.parentElement;
+      if (parent) {
+        const siblings = Array.from(parent.children).filter(el => el.tagName.toLowerCase() === tag);
+        if (siblings.length > 1) {
+          const index = siblings.indexOf(current);
+          if (index !== -1) part = `${tag}:nth-of-type(${index + 1})`;
+        }
+      }
+      pathParts.unshift(part);
+      current = current.parentElement;
+    }
+
+    const pathSel = pathParts.join(' > ');
+    if (pathSel && isUnique(pathSel, root)) return pathSel;
+
+    return generateDataAttributeSelector(element);
+  }
+
+  function generateHostSelector(host, root) {
+    if (!host || !root) return null;
+
+    if (host.id) return `#${CSS.escape(host.id)}`;
+
+    const attrs = ['data-testid', 'data-test', 'data-test-id', 'data-cy', 'data-qa', 'aria-label', 'name', 'role'];
+    const tag = host.tagName.toLowerCase();
+    for (const attr of attrs) {
+      const value = host.getAttribute(attr);
+      if (!value) continue;
+      const sel = `${tag}[${attr}="${CSS.escape(value)}"]`;
+      if (isUnique(sel, root)) return sel;
+    }
+
+    const classes = Array.from(host.classList).filter(isStableClass).slice(0, 3);
+    if (classes.length) {
+      const sel = `${tag}.${classes.map(c => CSS.escape(c)).join('.')}`;
+      if (isUnique(sel, root)) return sel;
+    }
+
+    const parent = VibeShadowDOMUtils.getParentElement(host);
+    if (parent) {
+      const siblings = Array.from(parent.children).filter(el => el.tagName.toLowerCase() === tag);
+      const index = siblings.indexOf(host);
+      if (index !== -1) return `${tag}:nth-of-type(${index + 1})`;
+    }
+
+    const pathParts = [];
+    let current = host;
+    while (current && current !== root) {
+      const currentTag = current.tagName.toLowerCase();
+      let part = currentTag;
+      const currentParent = VibeShadowDOMUtils.getParentElement(current);
+      if (currentParent) {
+        const siblings = Array.from(currentParent.children).filter(el => el.tagName.toLowerCase() === currentTag);
+        if (siblings.length > 1) {
+          const idx = siblings.indexOf(current);
+          if (idx !== -1) part = `${currentTag}:nth-of-type(${idx + 1})`;
+        }
+      }
+      pathParts.unshift(part);
+      current = VibeShadowDOMUtils.getParentElement(current);
+    }
+    const pathSel = pathParts.join(' > ');
+    if (pathSel && isUnique(pathSel, root)) return pathSel;
+
+    return null;
+  }
+
+  function findUniqueAttributeSelector(element, root = document) {
     // Priority order: stable test/identity attributes first, then semantic
     const stableAttrs = [
       'data-testid', 'data-test', 'data-test-id', 'data-cy', 'data-qa',
@@ -119,12 +228,12 @@ var VibeElementContext = (() => {
       const value = element.getAttribute(attr);
       if (value) {
         const sel = `${tag}[${attr}="${CSS.escape(value)}"]`;
-        if (isUnique(sel)) return sel;
+        if (isUnique(sel, root)) return sel;
       }
     }
 
     // Second pass: check nearest ancestor with a stable attribute (scoped selector)
-    let parent = element.parentElement;
+    let parent = VibeShadowDOMUtils.getParentElement(element);
     let depth = 0;
     while (parent && parent.tagName !== 'BODY' && depth < 5) {
       for (const attr of stableAttrs.slice(0, 8)) { // test attrs only
@@ -134,12 +243,12 @@ var VibeElementContext = (() => {
           // Build child selector relative to this stable parent
           const childTag = tag;
           // Check if element is a direct child — use child combinator only if so
-          const isDirectChild = element.parentElement === parent;
+          const isDirectChild = VibeShadowDOMUtils.getParentElement(element) === parent;
           if (isDirectChild) {
             const directChildren = Array.from(parent.querySelectorAll(`:scope > ${childTag}`));
             if (directChildren.length === 1 && directChildren[0] === element) {
               const sel = `${parentSel} > ${childTag}`;
-              if (isUnique(sel)) return sel;
+              if (isUnique(sel, root)) return sel;
             }
           }
           // Descendant selector with nth-of-type
@@ -147,18 +256,18 @@ var VibeElementContext = (() => {
           const idx = allOfType.indexOf(element);
           if (idx !== -1) {
             const sel = `${parentSel} ${childTag}:nth-of-type(${idx + 1})`;
-            if (isUnique(sel)) return sel;
+            if (isUnique(sel, root)) return sel;
           }
         }
       }
-      parent = parent.parentElement;
+      parent = VibeShadowDOMUtils.getParentElement(parent);
       depth++;
     }
 
     return null;
   }
 
-  function generateTextBasedSelector(element) {
+  function generateTextBasedSelector(element, root = document) {
     const text = element.textContent?.trim();
     if (!text || text.length > 100) return null;
     const tag = element.tagName.toLowerCase();
@@ -167,7 +276,9 @@ var VibeElementContext = (() => {
     const sanitized = text.replace(/[^\w\s]/g, '').trim();
     if (!sanitized || sanitized.length >= 50) return null;
 
-    const candidates = Array.from(document.querySelectorAll(tag));
+    const candidates = root === document
+      ? VibeShadowDOMUtils.querySelectorAllDeep(document, tag)
+      : Array.from(root.querySelectorAll(tag));
     const matches = candidates.filter(el =>
       el.textContent?.trim().replace(/[^\w\s]/g, '').trim() === sanitized
     );
@@ -191,7 +302,7 @@ var VibeElementContext = (() => {
   function generateLimitedContextSelector(element) {
     const classSel = generateClassSelector(element);
     if (!classSel) return null;
-    const parent = element.parentElement;
+    const parent = VibeShadowDOMUtils.getParentElement(element);
     if (!parent || parent.tagName === 'BODY') return null;
     const pClasses = Array.from(parent.classList)
       .filter(c => !c.startsWith('vibe-'))
@@ -203,7 +314,7 @@ var VibeElementContext = (() => {
 
   function generateFallbackSelector(element) {
     const tag = element.tagName.toLowerCase();
-    const parent = element.parentElement;
+    const parent = VibeShadowDOMUtils.getParentElement(element);
     if (!parent) return null;
 
     // Build qualified parent selector — require classes or ID to avoid fragile bare-tag selectors
@@ -252,7 +363,7 @@ var VibeElementContext = (() => {
       } else if (current.getAttribute('role')) {
         id = `${tag}[role="${current.getAttribute('role')}"]`;
       } else {
-        const siblings = Array.from(current.parentElement?.children || []);
+        const siblings = Array.from(VibeShadowDOMUtils.getParentElement(current)?.children || []);
         const same = siblings.filter(s => s.tagName.toLowerCase() === tag);
         if (same.length > 1) {
           id = `${tag}:nth-of-type(${same.indexOf(current) + 1})`;
@@ -260,7 +371,7 @@ var VibeElementContext = (() => {
       }
 
       path.unshift(id);
-      current = current.parentElement;
+      current = VibeShadowDOMUtils.getParentElement(current);
       depth++;
     }
     return path.length ? path.join(' > ') : null;
@@ -282,8 +393,11 @@ var VibeElementContext = (() => {
     ].some(p => p.test(cls));
   }
 
-  function isUnique(selector) {
-    try { return document.querySelectorAll(selector).length === 1; }
+  function isUnique(selector, root = document) {
+    try {
+      if (root === document) return VibeShadowDOMUtils.querySelectorAllDeep(document, selector).length === 1;
+      return root.querySelectorAll(selector).length === 1;
+    }
     catch { return false; }
   }
 
@@ -364,7 +478,7 @@ var VibeElementContext = (() => {
           fd++;
         }
       }
-      current = current.parentElement;
+      current = VibeShadowDOMUtils.getParentElement(current);
       depth++;
     }
     return null;
@@ -388,7 +502,7 @@ var VibeElementContext = (() => {
       const np = current.getAttribute('data-nextjs-path');
       if (np) return { filePath: normalizeSourcePath(np), lineRange: null, hasSourceMap: true };
 
-      current = current.parentElement;
+      current = VibeShadowDOMUtils.getParentElement(current);
       depth++;
     }
     return null;
@@ -478,13 +592,13 @@ var VibeElementContext = (() => {
   }
 
   function getComponentDepth(el) {
-    let depth = 0, current = el.parentElement;
+    let depth = 0, current = VibeShadowDOMUtils.getParentElement(el);
     while (current && depth < 10 && current.tagName !== 'BODY') {
       const cls = Array.from(current.classList);
       if (cls.some(c => /^[A-Z][a-zA-Z0-9]*/.test(c) || c.includes('component') || c.includes('container') || c.includes('wrapper'))) {
         depth++;
       }
-      current = current.parentElement;
+      current = VibeShadowDOMUtils.getParentElement(current);
     }
     return depth;
   }
@@ -565,7 +679,7 @@ var VibeElementContext = (() => {
 
   function getParentChainContext(element, maxDepth = 3) {
     const chain = [];
-    let current = element.parentElement;
+    let current = VibeShadowDOMUtils.getParentElement(element);
     let depth = 0;
     while (current && depth < maxDepth && current.tagName !== 'BODY') {
       const info = {
@@ -579,7 +693,7 @@ var VibeElementContext = (() => {
         ['nav', 'header', 'footer', 'main', 'section', 'article', 'aside'].includes(info.tag)) {
         chain.push(info);
       }
-      current = current.parentElement;
+      current = VibeShadowDOMUtils.getParentElement(current);
       depth++;
     }
     return chain.length ? chain : null;
@@ -587,9 +701,17 @@ var VibeElementContext = (() => {
 
   // --- Element finding (for badge re-rendering) ---
 
+  function resolveElementBySelector(selector) {
+    if (!selector) return null;
+    if (selector.includes(SHADOW_SELECTOR_SEPARATOR)) {
+      return VibeShadowDOMUtils.findByShadowSelector(document, selector, SHADOW_SELECTOR_SEPARATOR);
+    }
+    return VibeShadowDOMUtils.querySelectorDeep(document, selector);
+  }
+
   function findElementBySelector(annotation) {
     try {
-      const el = document.querySelector(annotation.selector);
+      const el = resolveElementBySelector(annotation.selector);
       if (el) {
         // Verify text content to catch drifted selectors
         const expectedText = annotation.element_context?.text;
@@ -608,7 +730,7 @@ var VibeElementContext = (() => {
     if (annotation.element_context?.text && annotation.element_context?.tag) {
       const tag = annotation.element_context.tag;
       const sanitized = annotation.element_context.text.replace(/[^\w\s]/g, '').trim();
-      const candidates = Array.from(document.querySelectorAll(tag));
+      const candidates = VibeShadowDOMUtils.querySelectorAllDeep(document, tag);
       let matches = candidates.filter(el =>
         el.textContent?.trim().replace(/[^\w\s]/g, '').trim() === sanitized
       );
@@ -648,7 +770,7 @@ var VibeElementContext = (() => {
       if (stableClasses.length) {
         try {
           const sel = `${annotation.element_context.tag}.${stableClasses.map(c => CSS.escape(c)).join('.')}`;
-          const candidates = document.querySelectorAll(sel);
+          const candidates = VibeShadowDOMUtils.querySelectorAllDeep(document, sel);
           if (candidates.length === 1) return candidates[0];
         } catch { /* continue */ }
       }
@@ -658,7 +780,7 @@ var VibeElementContext = (() => {
     if (annotation.selector.includes('data-vibe-id')) {
       const m = annotation.selector.match(/data-vibe-id="([^"]+)"/);
       if (m) {
-        const el = document.querySelector(`[data-vibe-id="${m[1]}"]`);
+        const el = VibeShadowDOMUtils.querySelectorDeep(document, `[data-vibe-id="${m[1]}"]`);
         if (el) return el;
       }
     }

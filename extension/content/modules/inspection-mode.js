@@ -11,6 +11,7 @@ var VibeInspectionMode = (() => {
   // Bound handlers for removal
   let onMouseOver = null;
   let onMouseOut = null;
+  let onPointerMove = null;
   let onPointerDown = null;
   let onMouseDown = null;
   let onClick = null;
@@ -39,12 +40,14 @@ var VibeInspectionMode = (() => {
     // Set up capture-phase listeners on document
     onMouseOver = handleMouseOver;
     onMouseOut = handleMouseOut;
+    onPointerMove = handlePointerMove;
     onPointerDown = handlePointerDown;
     onMouseDown = handleMouseDown;
     onClick = handleClick;
 
     document.addEventListener('mouseover', onMouseOver, true);
     document.addEventListener('mouseout', onMouseOut, true);
+    document.addEventListener('pointermove', onPointerMove, true);
     document.addEventListener('pointerdown', onPointerDown, true);
     document.addEventListener('mousedown', onMouseDown, true);
     document.addEventListener('click', onClick, true);
@@ -67,12 +70,13 @@ var VibeInspectionMode = (() => {
     if (listenersAttached) {
       document.removeEventListener('mouseover', onMouseOver, true);
       document.removeEventListener('mouseout', onMouseOut, true);
+      document.removeEventListener('pointermove', onPointerMove, true);
       document.removeEventListener('pointerdown', onPointerDown, true);
       document.removeEventListener('mousedown', onMouseDown, true);
       document.removeEventListener('click', onClick, true);
       listenersAttached = false;
     }
-    onMouseOver = onMouseOut = onPointerDown = onMouseDown = onClick = null;
+    onMouseOver = onMouseOut = onPointerMove = onPointerDown = onMouseDown = onClick = null;
 
     // Remove highlight
     if (highlightEl) { highlightEl.remove(); highlightEl = null; }
@@ -95,11 +99,34 @@ var VibeInspectionMode = (() => {
 
   let listenersAttached = false;
 
+  function getActualTarget(e) {
+    const path = e.composedPath?.() || [];
+    for (const node of path) {
+      if (node instanceof Element) return node;
+    }
+    return e.target instanceof Element ? e.target : null;
+  }
+
+  function getDeepElementFromPoint(clientX, clientY) {
+    let current = document.elementFromPoint(clientX, clientY);
+    let depth = 0;
+
+    while (current && current.shadowRoot && depth < 10) {
+      const next = current.shadowRoot.elementFromPoint(clientX, clientY);
+      if (!next || next === current) break;
+      current = next;
+      depth++;
+    }
+
+    return current;
+  }
+
   function tempDisable() {
     // Remove listeners but keep active=true so we can re-enable
     if (listenersAttached) {
       document.removeEventListener('mouseover', onMouseOver, true);
       document.removeEventListener('mouseout', onMouseOut, true);
+      document.removeEventListener('pointermove', onPointerMove, true);
       document.removeEventListener('pointerdown', onPointerDown, true);
       document.removeEventListener('mousedown', onMouseDown, true);
       document.removeEventListener('click', onClick, true);
@@ -113,6 +140,7 @@ var VibeInspectionMode = (() => {
     if (!active || listenersAttached) return;
     document.addEventListener('mouseover', onMouseOver, true);
     document.addEventListener('mouseout', onMouseOut, true);
+    document.addEventListener('pointermove', onPointerMove, true);
     document.addEventListener('pointerdown', onPointerDown, true);
     document.addEventListener('mousedown', onMouseDown, true);
     document.addEventListener('click', onClick, true);
@@ -131,8 +159,11 @@ var VibeInspectionMode = (() => {
 
     e.stopPropagation();
 
-    hoveredElement = e.target;
-    updateHighlight(e.target);
+    const target = getActualTarget(e) || getDeepElementFromPoint(e.clientX, e.clientY);
+    if (!target) return;
+
+    hoveredElement = target;
+    updateHighlight(target);
   }
 
   function handleMouseOut(e) {
@@ -144,8 +175,27 @@ var VibeInspectionMode = (() => {
 
     e.stopPropagation();
 
+    // Ignore intermediate transitions between elements.
+    if (e.relatedTarget) return;
+
     hoveredElement = null;
     if (highlightEl) highlightEl.style.display = 'none';
+  }
+
+  // Reliable hover across nested shadow roots.
+  function handlePointerMove(e) {
+    if (!active) return;
+
+    const path = e.composedPath();
+    const host = VibeShadowHost.getHost();
+    if (host && path.includes(host)) return;
+
+    const target = getActualTarget(e) || getDeepElementFromPoint(e.clientX, e.clientY);
+    if (!target || target === document.body || target === document.documentElement) return;
+    if (target === hoveredElement) return;
+
+    hoveredElement = target;
+    updateHighlight(target);
   }
 
   // Element selection on pointerdown — fires before frameworks can react
@@ -159,7 +209,7 @@ var VibeInspectionMode = (() => {
     e.preventDefault();
     e.stopImmediatePropagation();
 
-    const target = e.target;
+    const target = getActualTarget(e);
     if (!target || target === document.body || target === document.documentElement) return;
 
     tempDisable();

@@ -823,6 +823,7 @@ class VibeAnnotationsBackground {
           'content/modules/shadow-host.js',
           'content/modules/theme-manager.js',
           'content/modules/api-bridge.js',
+          'content/modules/shadow-dom-utils.js',
           'content/modules/element-context.js',
           'content/modules/badge-manager.js',
           'content/modules/inspection-mode.js',
