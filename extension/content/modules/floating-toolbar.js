@@ -11,6 +11,7 @@ var VibeToolbar = (() => {
   let serverOnline = false;
   let annotationCount = 0;
   let styleAnnotationCount = 0;
+  let currentPageAnnotations = [];
   let clearOnCopy = false;
   let screenshotEnabled = true;
   let badgeColor = '#4b5563';
@@ -80,8 +81,19 @@ var VibeToolbar = (() => {
     // Listen for events
     VibeEvents.on('inspection:started', () => { isAnnotating = true; updateUI(); });
     VibeEvents.on('inspection:stopped', () => { isAnnotating = false; updateUI(); });
-    VibeEvents.on('badges:rendered', ({ count, total, styleCount }) => { annotationCount = count; styleAnnotationCount = styleCount || 0; updateUI(); });
-    VibeEvents.on('annotations:cleared', () => { annotationCount = 0; styleAnnotationCount = 0; updateUI(); });
+    VibeEvents.on('annotations:render', updateCountsFromAnnotations);
+    VibeEvents.on('badges:rendered', ({ count, styleCount }) => {
+      if (currentPageAnnotations.length) return;
+      annotationCount = count;
+      styleAnnotationCount = styleCount || 0;
+      updateUI();
+    });
+    VibeEvents.on('annotations:cleared', () => {
+      currentPageAnnotations = [];
+      annotationCount = 0;
+      styleAnnotationCount = 0;
+      updateUI();
+    });
 
     // Periodic server status check
     setInterval(refreshServerStatus, 10000);
@@ -142,25 +154,24 @@ var VibeToolbar = (() => {
 
     // Copy all
     toolbarEl.querySelector('.vibe-tb-copy').addEventListener('click', async () => {
-      const annotations = await VibeAPI.loadAnnotations();
+      const annotations = await getCurrentPageAnnotations();
       if (!annotations.length) return;
       const text = formatAnnotationsForClipboard(annotations);
       try {
-        await navigator.clipboard.writeText(text);
+        await copyTextToClipboard(text);
         showCopyFeedback();
-      } catch {
-        const ta = document.createElement('textarea');
-        ta.value = text;
-        document.body.appendChild(ta);
-        ta.select();
-        document.execCommand('copy');
-        ta.remove();
-        showCopyFeedback();
+      } catch (err) {
+        console.error('[Vibe] Failed to copy annotations:', err);
+        showCopyFeedback(false);
+        return;
       }
+
+      updateCountsFromAnnotations(annotations);
 
       // Clear on copy if setting is enabled
       if (clearOnCopy) {
         // Reset count immediately so UI stays consistent
+        currentPageAnnotations = [];
         annotationCount = 0;
         styleAnnotationCount = 0;
         VibeEvents.emit('annotations:cleared', { count: annotations.length });
@@ -179,7 +190,8 @@ var VibeToolbar = (() => {
         if (!confirmed) return;
       }
 
-      const annotations = await VibeAPI.loadAnnotations();
+      const annotations = await getCurrentPageAnnotations();
+      currentPageAnnotations = [];
       annotationCount = 0;
       styleAnnotationCount = 0;
       VibeEvents.emit('annotations:cleared', { count: annotations.length });
@@ -191,6 +203,60 @@ var VibeToolbar = (() => {
       e.stopPropagation();
       toggleSettings();
     });
+  }
+
+  function updateCountsFromAnnotations(annotations = []) {
+    currentPageAnnotations = Array.isArray(annotations) ? annotations : [];
+    annotationCount = currentPageAnnotations.filter(a => a.type !== 'stylesheet').length;
+    styleAnnotationCount = currentPageAnnotations.filter(a => a.type === 'stylesheet').length;
+    updateUI();
+  }
+
+  async function getCurrentPageAnnotations() {
+    const annotations = await VibeAPI.loadAnnotations();
+    if (annotations.length || !currentPageAnnotations.length) {
+      updateCountsFromAnnotations(annotations);
+      return annotations;
+    }
+    return currentPageAnnotations;
+  }
+
+  async function copyTextToClipboard(text) {
+    if (navigator.clipboard?.writeText) {
+      try {
+        await navigator.clipboard.writeText(text);
+        return;
+      } catch {
+        // Fall through to the textarea fallback used for extension content scripts.
+      }
+    }
+
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed';
+    ta.style.top = '-9999px';
+    ta.style.left = '-9999px';
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    ta.setSelectionRange(0, ta.value.length);
+    const copied = document.execCommand('copy');
+    ta.remove();
+    if (!copied) throw new Error('document.execCommand("copy") returned false');
+  }
+
+  function showCopyFeedback(success = true) {
+    const btn = toolbarEl.querySelector('.vibe-tb-copy');
+    if (!btn) return;
+    btn.classList.add(success ? 'copied' : 'copy-failed');
+    const original = btn.innerHTML;
+    btn.innerHTML = success ? ICONS.check : ICONS.copy;
+    setTimeout(() => {
+      btn.classList.remove('copied', 'copy-failed');
+      btn.innerHTML = original;
+      updateUI();
+    }, 1000);
   }
 
   // --- Settings dropdown ---
@@ -795,13 +861,6 @@ var VibeToolbar = (() => {
     }
   }
 
-  function showCopyFeedback() {
-    const btn = toolbarEl.querySelector('.vibe-tb-copy');
-    if (!btn) return;
-    btn.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>';
-    setTimeout(() => { updateUI(); }, 1200);
-  }
-
   // --- Drag ---
 
   function setupDrag() {
@@ -1213,6 +1272,9 @@ var VibeToolbar = (() => {
       lines.push(`${i + 1}. ${identity}`);
       lines.push(`   Comment: ${a.comment}`);
       lines.push(`   Selector: ${a.selector}`);
+      if (a.frame_context?.path?.length) {
+        lines.push(`   Frame: ${formatFrameContext(a.frame_context)}`);
+      }
 
       // Styles — only non-trivial
       const styleStr = formatStyles(ec.styles);
@@ -1314,6 +1376,12 @@ var VibeToolbar = (() => {
       parts.push(`${cssName}:${val}`);
     }
     return parts.join(' \u00B7 ');
+  }
+
+  function formatFrameContext(frameContext) {
+    return frameContext.path
+      .map((part, index) => part.selector || part.id || part.name || `iframe ${index + 1}`)
+      .join(' > ');
   }
 
   function applyBadgeColor(color) {

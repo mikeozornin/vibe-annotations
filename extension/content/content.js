@@ -2,6 +2,7 @@
 // Orchestrates all modules loaded via manifest.json content_scripts
 // Modules are loaded in order and share execution context (no build step)
 console.log('[Vibe] content.js loaded');
+const VIBE_IS_TOP_FRAME = VibeShadowDOMUtils.isTopFrame();
 
 (async function VibeAnnotationsV2() {
   'use strict';
@@ -30,12 +31,16 @@ console.log('[Vibe] content.js loaded');
   // --- Initialize all modules ---
   async function init() {
     injectFontFace();
+    VibeFrameUtils.onInspectionStateChange((nextActive) => {
+      if (nextActive) VibeEvents.emit('inspection:start');
+      else VibeEvents.emit('inspection:stop');
+    });
 
-    // 1. Shadow host + styles
+    // 1. Shadow host + styles. Iframes need their own host for hover highlights and badges.
     VibeShadowHost.init();
 
     // 1b. Overlay hidden state is restored synchronously in VibeShadowHost.init()
-    const overlayClosed = VibeAPI.getOverlayHidden();
+    const overlayClosed = VIBE_IS_TOP_FRAME ? VibeAPI.getOverlayHidden() : false;
 
     // 2. Theme
     await VibeThemeManager.init();
@@ -50,7 +55,9 @@ console.log('[Vibe] content.js loaded');
     VibeInspectionMode.init();
     VibeAnnotationPopover.init();
     VibeBridgeHandler.init(() => annotations);
-    await VibeToolbar.init();
+    if (VIBE_IS_TOP_FRAME) {
+      await VibeToolbar.init();
+    }
 
     // 6. Set up message listener (popup ↔ content)
     setupMessageListener();
@@ -67,8 +74,8 @@ console.log('[Vibe] content.js loaded');
     // 9. Wire up annotation lifecycle events
     setupAnnotationEvents();
 
-    // 10. Wait for hydration, then show badges (skip if overlay is closed)
-    if (!overlayClosed) {
+    // 10. Wait for hydration, then show badges (top frame respects overlay state; subframes always render)
+    if (!VIBE_IS_TOP_FRAME || !overlayClosed) {
       waitForHydrationAndShowAnnotations();
     }
   }
@@ -190,9 +197,8 @@ console.log('[Vibe] content.js loaded');
         localSaveCount--;
         return;
       }
-      annotations = (allAnnotations || []).filter(a => a.url === window.location.href);
-      // Don't re-render if overlay is closed (styles should stay stripped)
-      if (VibeShadowHost.isVisible()) {
+      annotations = VibeAPI.filterAnnotationsForCurrentPage(allAnnotations || []);
+      if (!VIBE_IS_TOP_FRAME || VibeShadowHost.isVisible()) {
         VibeEvents.emit('annotations:render', annotations);
       }
     });
@@ -338,7 +344,9 @@ console.log('[Vibe] content.js loaded');
     // Clean up previous lazy observer
     if (lazyObserver) { lazyObserver.disconnect(); lazyObserver = null; }
 
-    const elementAnnotations = annotations.filter(a => a.type !== 'stylesheet');
+    const elementAnnotations = annotations.filter(a =>
+      a.type !== 'stylesheet' && VibeFrameUtils.isAnnotationForCurrentFrame(a)
+    );
     let attempts = 0;
     const tryShow = () => {
       attempts++;

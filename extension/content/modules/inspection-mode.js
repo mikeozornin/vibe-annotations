@@ -25,11 +25,15 @@ var VibeInspectionMode = (() => {
   function init() {
     VibeEvents.on('inspection:start', start);
     VibeEvents.on('inspection:stop', stop);
+    if (typeof VibeFrameUtils.onFrameMessage === 'function') {
+      VibeFrameUtils.onFrameMessage('inspection-reenable', () => reEnable());
+    }
   }
 
   function start() {
     if (active) return;
     active = true;
+    VibeFrameUtils.setInspectionState(true);
 
     const root = VibeShadowHost.getRoot();
     if (!root) return;
@@ -116,6 +120,7 @@ var VibeInspectionMode = (() => {
     const cursorStyle = document.querySelector('[data-vibe-cursor]');
     if (cursorStyle) cursorStyle.remove();
 
+    VibeFrameUtils.setInspectionState(false);
     VibeEvents.emit('inspection:stopped');
   }
 
@@ -241,7 +246,8 @@ var VibeInspectionMode = (() => {
     if (!target || target === document.body || target === document.documentElement) return;
 
     tempDisable();
-    VibeEvents.emit('inspection:elementClicked', { element: target, clientX: e.clientX, clientY: e.clientY });
+    const translated = VibeFrameUtils.translatePointToTop(e.clientX, e.clientY, window);
+    emitElementClicked(target, translated.x, translated.y, e.clientX, e.clientY);
   }
 
   // Arrow key DOM navigation — ↑ parent, ↓ retrace path back to anchor
@@ -264,11 +270,14 @@ var VibeInspectionMode = (() => {
     if (e.key === 'Enter') {
       const rect = current.getBoundingClientRect();
       tempDisable();
-      VibeEvents.emit('inspection:elementClicked', {
-        element: current,
-        clientX: rect.left + rect.width / 2,
-        clientY: rect.top + rect.height / 2
-      });
+      const translated = VibeFrameUtils.translatePointToTop(rect.left + rect.width / 2, rect.top + rect.height / 2, window);
+      emitElementClicked(
+        current,
+        translated.x,
+        translated.y,
+        rect.left + rect.width / 2,
+        rect.top + rect.height / 2
+      );
       return;
     }
 
@@ -289,6 +298,31 @@ var VibeInspectionMode = (() => {
     hoveredElement = next;
     navigatedByKeyboard = true;
     updateHighlight(next);
+  }
+
+  function emitElementClicked(element, clientX, clientY, localClientX, localClientY) {
+    const frameContext = VibeFrameUtils.getCurrentFrameContext();
+    if (frameContext && !VibeFrameUtils.isTopFrame()) {
+      if (typeof VibeFrameUtils.sendTopMessage === 'function') {
+        VibeFrameUtils.sendTopMessage('inspection-clicked', {
+          selector: VibeElementContext.generateSelector(element),
+          frame_context: frameContext,
+          topPoint: { x: clientX, y: clientY },
+          localPoint: { x: localClientX, y: localClientY }
+        });
+        return;
+      }
+      console.warn('[Vibe] Frame messaging unavailable; handling iframe selection locally');
+    }
+
+    VibeEvents.emit('inspection:elementClicked', {
+      element,
+      clientX,
+      clientY,
+      localClientX,
+      localClientY,
+      frame_context: frameContext
+    });
   }
 
   // Safety nets — swallow mousedown/click so frameworks never see the interaction

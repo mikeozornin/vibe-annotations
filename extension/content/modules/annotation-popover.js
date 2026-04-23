@@ -16,6 +16,7 @@ var VibeAnnotationPopover = (() => {
   let activeTextDirty = false; // Whether user actually edited text content
   let activeOriginalCssText = null; // Original inline style for revert on cancel
   let activeCssRulesStyleEl = null; // Companion <style> tag for CSS rules live preview
+  let activeInspectionFrameContext = null;
 
   // All design properties — used for dismiss/revert
   const ALL_DESIGN_PROPS = [
@@ -135,6 +136,17 @@ var VibeAnnotationPopover = (() => {
   function init() {
     VibeEvents.on('inspection:elementClicked', onElementClicked);
     VibeEvents.on('annotation:edit', onEditRequested);
+    const onTopMessage = getFrameMessageListener();
+    if (onTopMessage) onTopMessage('inspection-clicked', onIframeInspectionClicked);
+  }
+
+  function getFrameMessageListener() {
+    if (typeof VibeFrameUtils.onTopMessage === 'function') {
+      return VibeFrameUtils.onTopMessage;
+    }
+
+    console.warn('[Vibe] Frame messaging listener unavailable; iframe annotations may be limited');
+    return null;
   }
 
   function getTabsForType(elType) {
@@ -202,7 +214,8 @@ var VibeAnnotationPopover = (() => {
   ];
 
   function buildRawCssContent(context) {
-    const s = window.getComputedStyle(context._element || document.body);
+    const element = context._element || document.body;
+    const s = (element.ownerDocument?.defaultView || window).getComputedStyle(element);
     const lines = [];
     for (const prop of RAW_CSS_PROPS) {
       const val = s[prop.js];
@@ -227,6 +240,39 @@ var VibeAnnotationPopover = (() => {
     show(element, context, null, clientX, clientY);
   }
 
+
+  async function onIframeInspectionClicked(payload, event) {
+    if (!VibeAPI.isTopFrame()) return;
+    if (!payload?.selector || !payload?.frame_context) return;
+
+    const resolved = VibeFrameUtils.resolveFrameContext(payload.frame_context);
+    if (!resolved?.document) {
+      console.warn('[Vibe] Unable to open popover for cross-origin or inaccessible iframe target');
+      VibeEvents.emit('inspection:stop');
+      return;
+    }
+    if (event?.source && resolved.window && event.source !== resolved.window) {
+      console.warn('[Vibe] Ignoring iframe inspection message from unexpected frame');
+      return;
+    }
+
+    const target = VibeShadowDOMUtils.isShadowSelector(payload.selector)
+      ? VibeShadowDOMUtils.findByShadowSelector(resolved.document, payload.selector)
+      : resolved.document.querySelector(payload.selector);
+
+    if (!target) {
+      console.warn('[Vibe] Unable to resolve iframe target for annotation popover');
+      VibeEvents.emit('inspection:stop');
+      return;
+    }
+
+    const context = await VibeElementContext.generate(target);
+    if (payload.frame_context) context.frame_context = payload.frame_context;
+    VibeInspectionMode.tempDisable();
+    show(target, context, null, payload.topPoint?.x, payload.topPoint?.y);
+    activeInspectionFrameContext = payload.frame_context;
+  }
+
   async function onEditRequested({ annotation, element }) {
     VibeInspectionMode.tempDisable();
     const context = await VibeElementContext.generate(element);
@@ -249,7 +295,7 @@ var VibeAnnotationPopover = (() => {
     currentTargetHighlight = document.createElement('div');
     currentTargetHighlight.className = 'vibe-target-highlight';
     root.appendChild(currentTargetHighlight);
-    positionTargetHighlight(targetElement);
+    positionTargetHighlight(targetElement, context);
 
     // Anchor wrapper (full viewport, catches outside clicks)
     const anchor = document.createElement('div');
@@ -656,9 +702,15 @@ var VibeAnnotationPopover = (() => {
       } else {
         const annotation = buildAnnotation(context, comment, pendingChanges);
         if (cssField) annotation.css = cssField;
+        if (context.frame_context) annotation.frame_context = context.frame_context;
         if (clickX != null) {
           const r = targetElement.getBoundingClientRect();
-          annotation.badge_offset = { x: clickX - r.left, y: clickY - r.top };
+          const translatedRect = VibeFrameUtils.translateRectToTop(r, targetElement.ownerDocument?.defaultView || window);
+          if (context.frame_context && translatedRect) {
+            annotation.badge_offset = { x: clickX - translatedRect.left, y: clickY - translatedRect.top };
+          } else {
+            annotation.badge_offset = { x: clickX - r.left, y: clickY - r.top };
+          }
         }
         await VibeAPI.saveAnnotation(annotation);
         VibeEvents.emit('annotation:saved', { annotation, element: targetElement });
@@ -1969,6 +2021,11 @@ var VibeAnnotationPopover = (() => {
     activeTextDirty = false;
     activeOriginalCssText = null;
     if (hadPopover && !saved) VibeEvents.emit('popover:cancelled');
+    const inspectionFrameContext = activeInspectionFrameContext;
+    activeInspectionFrameContext = null;
+    if (reEnableInspection && inspectionFrameContext && typeof VibeFrameUtils.sendFrameMessage === 'function') {
+      VibeFrameUtils.sendFrameMessage(inspectionFrameContext, 'inspection-reenable');
+    }
     if (reEnableInspection) VibeInspectionMode.reEnable();
   }
 
@@ -2043,11 +2100,14 @@ var VibeAnnotationPopover = (() => {
     popover.style.left = `${left}px`;
   }
 
-  function positionTargetHighlight(element) {
+  function positionTargetHighlight(element, context) {
     if (!currentTargetHighlight) return;
     const update = () => {
       if (!currentTargetHighlight) return;
-      const rect = element.getBoundingClientRect();
+      const rawRect = element.getBoundingClientRect();
+      const rect = VibeAPI.isTopFrame() && context?.frame_context
+        ? VibeFrameUtils.translateRectToTop(rawRect, element.ownerDocument?.defaultView || window)
+        : rawRect;
       currentTargetHighlight.style.top = `${rect.top - 2}px`;
       currentTargetHighlight.style.left = `${rect.left - 2}px`;
       currentTargetHighlight.style.width = `${rect.width + 4}px`;
@@ -2109,7 +2169,7 @@ var VibeAnnotationPopover = (() => {
   function buildAnnotation(context, comment, pendingChanges) {
     const annotation = {
       id: 'vibe_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9),
-      url: window.location.href,
+      url: VibeAPI.getAnnotationPageUrl(),
       selector: context.selector,
       comment,
       viewport: context.viewport,
@@ -2130,6 +2190,7 @@ var VibeAnnotationPopover = (() => {
       context_hints: context.source_mapping?.context_hints || null,
       screenshot: context.screenshot || null,
       parent_chain: context.parent_chain || null,
+      frame_context: context.frame_context || null,
       status: 'pending',
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString()

@@ -970,6 +970,7 @@ class VibeAnnotationsBackground {
           'content/modules/theme-manager.js',
           'content/modules/api-bridge.js',
           'content/modules/shadow-dom-utils.js',
+          'content/modules/frame-utils.js',
           'content/modules/element-context.js',
           'content/modules/badge-manager.js',
           'content/modules/inspection-mode.js',
@@ -979,6 +980,7 @@ class VibeAnnotationsBackground {
           'content/content.js'
         ],
         runAt: 'document_idle',
+        allFrames: true,
         persistAcrossSessions: true
       }]);
 
@@ -990,6 +992,7 @@ class VibeAnnotationsBackground {
         matches: [originPattern],
         js: ['content/bridge-api.js'],
         world: 'MAIN',
+        allFrames: true,
         runAt: 'document_start',
         persistAcrossSessions: true
       }]);

@@ -64,17 +64,21 @@ var VibeBridgeHandler = (() => {
     'boxShadow','overflow','position','top','right','bottom','left','zIndex'
   ];
 
-  async function handleCreate({ selector, comment, cssChanges, textChange, css }) {
+  async function handleCreate({ selector, comment, cssChanges, textChange, css, frame_context }) {
     if (!selector) throw new Error('selector is required');
 
-    const el = document.querySelector(selector);
+    const frameContext = frame_context || null;
+    const root = VibeFrameUtils.resolveFrameContext(frameContext);
+    const rootDocument = root?.document || document;
+    const el = VibeElementContext.resolveSelector(selector, rootDocument);
     if (!el) throw new Error('Element not found: ' + selector);
 
     // Generate element context (captures computed styles BEFORE our changes)
     const context = await VibeElementContext.generate(el);
+    if (frameContext) context.frame_context = frameContext;
 
     const pendingChanges = {};
-    const computed = window.getComputedStyle(el);
+    const computed = (el.ownerDocument?.defaultView || window).getComputedStyle(el);
 
     if (cssChanges && typeof cssChanges === 'object') {
       // Explicit changes passed — apply them and record originals
@@ -108,10 +112,11 @@ var VibeBridgeHandler = (() => {
     // Build annotation
     const annotation = {
       id: 'vibe_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9),
-      url: window.location.href,
+      url: VibeAPI.getAnnotationPageUrl(),
       selector: context.selector,
       comment: comment || '',
       viewport: context.viewport,
+      frame_context: context.frame_context || null,
       element_context: {
         tag: context.tag,
         id: context.id,
@@ -128,6 +133,7 @@ var VibeBridgeHandler = (() => {
       source_map_available: context.source_mapping?.source_map_available || false,
       context_hints: context.source_mapping?.context_hints || null,
       parent_chain: context.parent_chain || null,
+      frame_context: context.frame_context || null,
       status: 'pending',
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString()
@@ -156,7 +162,7 @@ var VibeBridgeHandler = (() => {
     const annotation = {
       id: 'vibe_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9),
       type: 'stylesheet',
-      url: window.location.href,
+      url: VibeAPI.getAnnotationPageUrl(),
       css,
       comment: comment || '',
       viewport: { width: window.innerWidth, height: window.innerHeight },

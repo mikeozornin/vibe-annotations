@@ -32,6 +32,7 @@ https://github.com/user-attachments/assets/4c134852-090b-4974-85e5-be77a95636f9
 
 - 🏠 **Local development focused**: Works on localhost, .local, .test, .localhost domains
 - 📑 **Multi-page annotations**: Create feedback across multiple routes in your app, then bulk-process all annotations at once for efficient fixes
+- 🪟 **Same-origin iframe support**: Inspect and annotate elements inside same-origin iframes; cross-origin iframes remain unsupported for now
 - 🤖 **AI-powered**: Integrates with AI coding agents via MCP
 - ⚡ **Instant feedback**: Click, comment, bulk-fix
 - 👨‍💻 **Developer-friendly**: Built for modern web development

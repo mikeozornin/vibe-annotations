@@ -114,7 +114,11 @@ var VibeBadgeManager = (() => {
     removeProvisional();
     clearAll();
 
-    const sorted = [...annotations].sort((a, b) =>
+    const relevantAnnotations = annotations.filter(annotation =>
+      VibeFrameUtils.isAnnotationForCurrentFrame(annotation)
+    );
+
+    const sorted = [...relevantAnnotations].sort((a, b) =>
       new Date(a.created_at) - new Date(b.created_at)
     );
 
@@ -145,8 +149,8 @@ var VibeBadgeManager = (() => {
       }
     });
 
-    lastTotal = annotations.length;
-    VibeEvents.emit('badges:rendered', { count: badges.length, total: annotations.length, styleCount: styleInjections.filter(s => s.annotation.type === 'stylesheet').length });
+    lastTotal = relevantAnnotations.length;
+    VibeEvents.emit('badges:rendered', { count: badges.length, total: relevantAnnotations.length, styleCount: styleInjections.filter(s => s.annotation.type === 'stylesheet').length });
   }
 
   function injectStyleAnnotation(annotation) {

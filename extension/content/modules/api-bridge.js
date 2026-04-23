@@ -17,6 +17,23 @@ var VibeAPI = (() => {
       || h.endsWith('.local') || h.endsWith('.test') || h.endsWith('.localhost');
   }
 
+  function isTopFrame() {
+    return window.top === window.self;
+  }
+
+  function getAnnotationPageUrl() {
+    try {
+      return window.top.location.href;
+    } catch {
+      return window.location.href;
+    }
+  }
+
+  function filterAnnotationsForCurrentPage(annotations) {
+    const pageUrl = getAnnotationPageUrl();
+    return (annotations || []).filter(a => a.url === pageUrl);
+  }
+
   // --- Server status ---
 
   async function checkServerStatus() {
@@ -67,7 +84,7 @@ var VibeAPI = (() => {
     try {
       const result = await chrome.storage.local.get(['annotations']);
       const all = result.annotations || [];
-      return all.filter(a => a.url === window.location.href);
+      return filterAnnotationsForCurrentPage(all);
     } catch {
       return [];
     }
@@ -286,6 +303,9 @@ var VibeAPI = (() => {
     checkServerStatus,
     clearStatusCache,
     isFileProtocol,
+    isTopFrame,
+    getAnnotationPageUrl,
+    filterAnnotationsForCurrentPage,
     loadAnnotations,
     loadProjectAnnotations,
     saveAnnotation,

@@ -144,6 +144,140 @@ var VibeShadowDOMUtils = (() => {
     return selector && selector.includes(SHADOW_SEPARATOR);
   }
 
+
+  // --- Frame helpers ---
+
+  function isTopFrame() {
+    return window.top === window;
+  }
+
+  function getSameOriginFrameElement() {
+    if (isTopFrame()) return null;
+    try {
+      return window.frameElement instanceof HTMLIFrameElement ? window.frameElement : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function buildFrameContext() {
+    if (isTopFrame()) return null;
+
+    const selectors = [];
+    let currentWindow = window;
+
+    while (currentWindow !== currentWindow.top) {
+      let frameEl;
+      try {
+        frameEl = currentWindow.frameElement;
+      } catch {
+        return { same_origin: false, selectors: selectors.length ? selectors : null };
+      }
+      if (!(frameEl instanceof HTMLIFrameElement)) {
+        return { same_origin: false, selectors: selectors.length ? selectors : null };
+      }
+      const selector = buildFrameSelector(frameEl);
+      if (!selector) {
+        return { same_origin: false, selectors: selectors.length ? selectors : null };
+      }
+      selectors.unshift(selector);
+      currentWindow = currentWindow.parent;
+    }
+
+    return {
+      same_origin: true,
+      selectors,
+      depth: selectors.length
+    };
+  }
+
+  function buildFrameSelector(frameEl) {
+    const tag = frameEl.tagName.toLowerCase();
+    if (frameEl.id) return `${tag}#${CSS.escape(frameEl.id)}`;
+
+    const stableAttrs = ['data-testid', 'data-test', 'data-test-id', 'name', 'title', 'src'];
+    for (const attr of stableAttrs) {
+      const value = frameEl.getAttribute(attr);
+      if (!value) continue;
+      const selector = `${tag}[${attr}="${CSS.escape(value)}"]`;
+      try {
+        if (frameEl.ownerDocument.querySelectorAll(selector).length === 1) return selector;
+      } catch { /* continue */ }
+    }
+
+    const parent = frameEl.parentElement;
+    if (!parent) return tag;
+    const siblings = Array.from(parent.children).filter(el => el.tagName.toLowerCase() === tag);
+    const index = siblings.indexOf(frameEl);
+    if (index === -1) return tag;
+    return `${tag}:nth-of-type(${index + 1})`;
+  }
+
+  function resolveFrameContext(frameContext) {
+    if (!frameContext || !frameContext.selectors?.length) return { root: document, frameElement: null, sameOrigin: true };
+
+    let currentDocument = window.top.document;
+    let frameElement = null;
+
+    for (const selector of frameContext.selectors) {
+      let nextFrame = null;
+      try {
+        nextFrame = currentDocument.querySelector(selector);
+      } catch {
+        return { root: null, frameElement: null, sameOrigin: false };
+      }
+      if (!(nextFrame instanceof HTMLIFrameElement)) return { root: null, frameElement: null, sameOrigin: false };
+      frameElement = nextFrame;
+      try {
+        currentDocument = nextFrame.contentDocument;
+      } catch {
+        return { root: null, frameElement, sameOrigin: false };
+      }
+      if (!currentDocument) return { root: null, frameElement, sameOrigin: false };
+    }
+
+    return { root: currentDocument, frameElement, sameOrigin: true };
+  }
+
+  function isAnnotationForCurrentFrame(annotation) {
+    const expected = annotation?.frame_context;
+    const current = buildFrameContext();
+
+    if (!expected || !expected.selectors?.length) return isTopFrame();
+    if (expected.same_origin === false) return false;
+    if (!current || !current.selectors?.length) return false;
+    return JSON.stringify(expected.selectors) == JSON.stringify(current.selectors);
+  }
+
+  function translateRectToTopWindow(rect) {
+    let top = rect.top;
+    let left = rect.left;
+    let currentWindow = window;
+
+    while (currentWindow !== currentWindow.top) {
+      let frameEl;
+      try {
+        frameEl = currentWindow.frameElement;
+      } catch {
+        return null;
+      }
+      if (!(frameEl instanceof Element)) return null;
+      const frameRect = frameEl.getBoundingClientRect();
+      top += frameRect.top;
+      left += frameRect.left;
+      currentWindow = currentWindow.parent;
+    }
+
+    return {
+      top,
+      left,
+      width: rect.width,
+      height: rect.height,
+      right: left + rect.width,
+      bottom: top + rect.height
+    };
+  }
+
   // --- Keyboard DOM navigation helpers ---
 
   function isVibeHost(el) {
@@ -194,6 +328,12 @@ var VibeShadowDOMUtils = (() => {
     buildShadowSelector,
     findByShadowSelector,
     isShadowSelector,
+    isTopFrame,
+    getSameOriginFrameElement,
+    buildFrameContext,
+    resolveFrameContext,
+    isAnnotationForCurrentFrame,
+    translateRectToTopWindow,
     elementFromPointDeep,
     getNavigableParent,
     getFirstDrillChild,
